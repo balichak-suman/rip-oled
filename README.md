@@ -56,168 +56,128 @@ Software Setup
    sudo apt install -y i2c-tools
    sudo raspi-config nonint do_i2c 0
 
-2. Create Project Folder and Virtual Environment
-   cd ~
-   mkdir oled_display && cd oled_display
-   python3 -m venv oled-env
-   source oled-env/bin/activate
+2. 
+    # ===============================================
+# OLED System Stats Display — Full Auto Setup
+# Raspberry Pi Zero 2 W (Kali Linux)
+# Author: Balichak Suman
+# ===============================================
 
-3. Install Required Libraries
-   pip install Adafruit-Blinka adafruit-circuitpython-ssd1306 pillow psutil RPi.GPIO
+# ---- Step 1: System Update & Dependencies ----
+sudo apt update
+sudo apt install -y python3-venv python3-pip python3-dev i2c-tools git
 
-4. Create OLED Display Script
-   nano system_stats_cycle.py
+# ---- Step 2: Create Python Virtual Environment ----
+python3 -m venv ~/oled-env
+source ~/oled-env/bin/activate
+pip install adafruit-circuitpython-ssd1306 psutil pillow luma.oled
 
-Paste this code:
-
--------------------------------------------------------
+# ---- Step 3: Create Main Python Script ----
+sudo tee /usr/local/bin/system_stats_cycle.py > /dev/null << 'EOF'
+#!/usr/bin/env python3
 import time
-import subprocess
 import psutil
-import board
-import busio
 import socket
 from PIL import Image, ImageDraw, ImageFont
-import adafruit_ssd1306
+from luma.core.interface.serial import i2c
+from luma.oled.device import ssd1306
 
-# --- OLED setup ---
-i2c = busio.I2C(board.SCL, board.SDA)
-oled = adafruit_ssd1306.SSD1306_I2C(128, 64, i2c, addr=0x3C)
-oled.fill(0)
-oled.show()
+# Initialize I2C and OLED
+serial = i2c(port=1, address=0x3C)
+device = ssd1306(serial, rotate=0)
 
-# --- Font setup ---
-font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-font_large = ImageFont.truetype(font_path, 20)
-font_small = ImageFont.load_default()
-
-def get_text_size(draw, text, font):
-    bbox = draw.textbbox((0, 0), text, font=font)
-    return bbox[2] - bbox[0], bbox[3] - bbox[1]
+# Fonts
+font_big = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
+font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 13)
 
 def get_ip():
-    try:
-        ip = subprocess.check_output(
-            "ip -4 addr show wlan0 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}'",
-            shell=True
-        ).decode().strip()
-        if ip:
-            return ip
-    except Exception:
-        pass
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
         s.close()
         return ip
-    except Exception:
+    except:
         return "No IP"
+
+def get_cpu_usage():
+    return psutil.cpu_percent(interval=1)
 
 def get_temp():
     try:
-        temp = subprocess.check_output("vcgencmd measure_temp", shell=True).decode()
-        return temp.replace("temp=", "").strip()
-    except Exception:
-        temps = psutil.sensors_temperatures()
-        if temps:
-            for _, entries in temps.items():
-                if entries:
-                    return f"{entries[0].current:.1f}°C"
-        return "N/A"
+        with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+            temp_c = int(f.read()) / 1000
+        return temp_c
+    except:
+        return 0.0
 
-def show_text(title, value):
-    image = Image.new("1", (oled.width, oled.height))
-    draw = ImageDraw.Draw(image)
-
-    w_title, h_title = get_text_size(draw, title, font_small)
-    draw.text(((oled.width - w_title) / 2, 0), title, font=font_small, fill=255)
-
-    if title.lower().startswith("wi-fi"):
-        size = 22
-        while True:
-            dynamic_font = ImageFont.truetype(font_path, size)
-            w_val, h_val = get_text_size(draw, value, dynamic_font)
-            if w_val <= oled.width - 4 or size <= 10:
-                break
-            size -= 1
-    else:
-        dynamic_font = font_large
-        w_val, h_val = get_text_size(draw, value, dynamic_font)
-
-    draw.text(
-        ((oled.width - w_val) / 2, (oled.height - h_val) / 2),
-        value,
-        font=dynamic_font,
-        fill=255
-    )
-
-    oled.image(image)
-    oled.show()
+def get_disk():
+    disk = psutil.disk_usage('/')
+    return (disk.used // (1024 * 1024), disk.total // (1024 * 1024))
 
 while True:
-    show_text("Wi-Fi IP", get_ip())
-    time.sleep(3)
-    show_text("CPU Usage", f"{psutil.cpu_percent()}%")
-    time.sleep(3)
-    show_text("Memory", f"{psutil.virtual_memory().percent}%")
-    time.sleep(3)
-    show_text("Disk", f"{psutil.disk_usage('/').percent}%")
-    time.sleep(3)
-    show_text("Temp", get_temp())
-    time.sleep(3)
--------------------------------------------------------
+    ip = get_ip()
+    cpu = get_cpu_usage()
+    temp = get_temp()
+    used, total = get_disk()
 
-Save and exit (Ctrl + O, Enter, Ctrl + X).
-Test:
-   python3 system_stats_cycle.py
+    image = Image.new("1", (device.width, device.height))
+    draw = ImageDraw.Draw(image)
 
-5. Set Up Autostart (systemd)
-   sudo nano /etc/systemd/system/oled-display.service
+    # Center IP heading
+    ip_w, ip_h = draw.textbbox((0, 0), ip, font=font_big)[2:]
+    draw.text(((device.width - ip_w) // 2, 0), ip, font=font_big, fill=255)
 
-Paste:
+    # System stats
+    lines = [
+        f"CPU: {cpu:.1f}%",
+        f"Temp: {temp:.1f}°C",
+        f"Disk: {used}/{total} MB"
+    ]
+
+    y = ip_h + 4
+    for line in lines:
+        w, h = draw.textbbox((0, 0), line, font=font_small)[2:]
+        draw.text(((device.width - w) // 2, y), line, font=font_small, fill=255)
+        y += h + 1
+
+    device.display(image)
+    time.sleep(3)
+EOF
+
+# ---- Step 4: Set Permissions and Lock Script ----
+sudo chmod +x /usr/local/bin/system_stats_cycle.py
+sudo chattr +i /usr/local/bin/system_stats_cycle.py
+
+# ---- Step 5: Create Systemd Service ----
+sudo tee /etc/systemd/system/system_stats_cycle.service > /dev/null << 'EOF'
 [Unit]
-Description=OLED Display System Stats
-After=network.target
+Description=OLED System Stats Display
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-ExecStart=/home/kali/oled_display/oled-env/bin/python3 /home/kali/oled_display/system_stats_cycle.py
-WorkingDirectory=/home/kali/oled_display
-StandardOutput=inherit
-StandardError=inherit
+ExecStart=/home/kali/oled-env/bin/python3 /usr/local/bin/system_stats_cycle.py
 Restart=always
 User=kali
+Environment=PATH=/home/kali/oled-env/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+WorkingDirectory=/home/kali
 
 [Install]
 WantedBy=multi-user.target
+EOF
 
-Enable it:
-   sudo systemctl daemon-reload
-   sudo systemctl enable oled-display.service
-   sudo systemctl start oled-display.service
+# ---- Step 6: Enable & Start Service ----
+sudo systemctl daemon-reload
+sudo systemctl enable system_stats_cycle.service
+sudo systemctl start system_stats_cycle.service
 
-Check status:
-   sudo systemctl status oled-display.service
-
-Testing & Maintenance
----------------------
-Manual Run:
-   source ~/oled_display/oled-env/bin/activate
-   python3 ~/oled_display/system_stats_cycle.py
-
-Stop/Start Service:
-   sudo systemctl stop oled-display
-   sudo systemctl start oled-display
-
-Remove Autostart:
-   sudo systemctl disable oled-display
-
-Verification Checklist
-----------------------
-- I²C enabled
-- OLED wired correctly
-- Address 0x3C detected
-- Python script works manually
-- Autostart works on reboot
-- Battery output 5.1 V
-- OLED cycles stats every 3 s
+# ---- Step 7: Verify Setup ----
+echo ""
+echo "✅ OLED System Stats Display Installed & Running!"
+echo "Check status using: sudo systemctl status system_stats_cycle.service"
+echo "View logs using: sudo journalctl -u system_stats_cycle.service -n 20 --no-pager"
+echo "Script locked at: /usr/local/bin/system_stats_cycle.py"
+echo "Virtual Env Path: /home/kali/oled-env"
+echo "----------------------------------------------"
+EOF

@@ -1,79 +1,72 @@
+#!/usr/bin/env python3
 import time
-import board
-import busio
 import psutil
 import socket
-import subprocess
 from PIL import Image, ImageDraw, ImageFont
-import adafruit_ssd1306
+from luma.core.interface.serial import i2c
+from luma.oled.device import ssd1306
 
 # Initialize I2C and OLED
-i2c = busio.I2C(board.SCL, board.SDA)
-oled = adafruit_ssd1306.SSD1306_I2C(128, 64, i2c, addr=0x3C)
+serial = i2c(port=1, address=0x3C)
+device = ssd1306(serial, rotate=0)
 
-# Load fonts
-font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)
-font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16)
-font_medium = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
+# Fonts
+font_big = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
+font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 13)
 
-# Function to get Wi-Fi IP (wlan0 or adapter with internet)
 def get_ip():
+    """Return IP address from wlan0 or wlan1, whichever has internet"""
     try:
-        ip = subprocess.check_output("hostname -I", shell=True).decode().split()
-        for address in ip:
-            if address.startswith("10.") or address.startswith("192.") or address.startswith("172."):
-                return address
-        return "No WiFi"
-    except Exception:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except:
         return "No IP"
 
-# Function to get CPU temperature
+def get_cpu_usage():
+    return psutil.cpu_percent(interval=1)
+
 def get_temp():
+    """Get CPU temperature in °C"""
     try:
-        output = subprocess.check_output("vcgencmd measure_temp", shell=True).decode()
-        return output.replace("temp=", "").strip()
-    except Exception:
-        return "N/A"
+        with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+            temp_c = int(f.read()) / 1000
+        return temp_c
+    except:
+        return 0.0
 
-# Function to get CPU usage %
-def get_cpu():
-    return str(psutil.cpu_percent(interval=1)) + "%"
+def get_disk():
+    """Get used and total disk space in MB"""
+    disk = psutil.disk_usage('/')
+    return (disk.used // (1024 * 1024), disk.total // (1024 * 1024))
 
-# Function to get Storage %
-def get_storage():
-    usage = psutil.disk_usage('/')
-    return f"{usage.percent}%"
+while True:
+    ip = get_ip()
+    cpu = get_cpu_usage()
+    temp = get_temp()
+    used, total = get_disk()
 
-# Function to display centered text
-def show_text(title, value):
-    oled.fill(0)
-    image = Image.new("1", (oled.width, oled.height))
+    image = Image.new("1", (device.width, device.height))
     draw = ImageDraw.Draw(image)
 
-    # Title
-    w_title, h_title = font_small.getbbox(title)[2:]
-    draw.text(((oled.width - w_title) // 2, 5), title, font=font_small, fill=255)
+    # --- Center IP address at top ---
+    ip_w, ip_h = draw.textbbox((0, 0), ip, font=font_big)[2:]
+    draw.text(((device.width - ip_w) // 2, -2), ip, font=font_big, fill=255)
 
-    # Adjust font for long IPs only
-    if title.lower().startswith("wi-fi") and len(value) > 12:
-        font_used = font_medium
-    else:
-        font_used = font_large
+    # --- System stats below ---
+    lines = [
+        f"CPU: {cpu:.1f}%",
+        f"Temp: {temp:.1f}°C",
+        f"Disk: {used}/{total} MB"
+    ]
 
-    # Value
-    w_value, h_value = font_used.getbbox(value)[2:]
-    draw.text(((oled.width - w_value) // 2, (oled.height - h_value) // 2 + 10), value, font=font_used, fill=255)
+    y = ip_h + 2
+    for line in lines:
+        w, h = draw.textbbox((0, 0), line, font=font_small)[2:]
+        draw.text(((device.width - w) // 2, y), line, font=font_small, fill=255)
+        y += h + 1
 
-    oled.image(image)
-    oled.show()
-
-# Main loop (cycle every 3 seconds)
-while True:
-    show_text("Wi-Fi IP", get_ip())
-    time.sleep(3)
-    show_text("CPU Temp", get_temp())
-    time.sleep(3)
-    show_text("CPU Usage", get_cpu())
-    time.sleep(3)
-    show_text("Storage", get_storage())
+    device.display(image)
     time.sleep(3)
